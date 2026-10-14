@@ -1,13 +1,17 @@
 /* ------------------------------------------------------------------
-   Calixir Paris — logique du site
-   Carte → sélection → demande de devis (livraison, coordonnées) → envoi.
-   Aucune dépendance. Les données viennent de data.js.
+   Calixir Paris · Offre livrée : sélection → demande de devis
+   Les pages (cartes, listes, FAQ) sont générées par build.py ; ce script
+   ajoute l'interactivité : boutons « Ajouter à ma demande », fiche produit,
+   sélection (type panier, sans paiement), formulaire de devis, récapitulatif
+   et confirmation. Données : data.js (généré depuis carte/carte.xlsx).
 ------------------------------------------------------------------- */
 (function () {
   'use strict';
 
   const C = window.CAL;
   const cfg = C.config;
+  const ROOT = document.body.dataset.root || '';
+  const IMG = ROOT + 'assets/img/produits/';
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -15,6 +19,7 @@
   const eur = n => fmt.format(n).replace(/[  ]/g, ' ') + ' €';
   const eurTxt = n => eur(n).replace(/ /g, ' ');
   const hid = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return 'k' + (h >>> 0).toString(36); };
+  const delayLabel = d => String(d).replace(/(\d+)\s*h/i, '$1 h');
 
   const ICON = {
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
@@ -24,8 +29,7 @@
   };
 
   const byId = new Map(C.products.map(p => [p.id, p]));
-  const groupById = new Map(C.groups.map(g => [g.id, g]));
-  const tabOf = p => groupById.get(p.group).tab;
+  const catName = new Map(C.categories.map(c => [c.slug, c.name]));
 
   /* ---------- Stockage (tolérant : navigation privée, file://, etc.) ---------- */
   const store = {
@@ -37,12 +41,32 @@
   let form = saved.form && typeof saved.form === 'object' ? saved.form : {};
   const persist = () => store.write({ cart, form });
 
-  /* ---------- Panier ---------- */
+  /* ---------- Sélection (panier sans paiement) ---------- */
   const optsKey = o => JSON.stringify(Object.keys(o).sort().map(k => [k, Array.isArray(o[k]) ? o[k].slice().sort() : o[k]]));
   const lineKey = (id, opts) => id + '::' + optsKey(opts);
   cart.forEach(l => { l.key = lineKey(l.id, l.opts); });
   const findLine = key => cart.find(l => l.key === key);
   const qtyOf = id => cart.filter(l => l.id === id).reduce((n, l) => n + l.qty, 0);
+
+  /* Prix unitaire d'une ligne : prix de la formule choisie (ex. Agapé) ou prix du produit. */
+  function unitPrice(l) {
+    const p = byId.get(l.id);
+    if (p.priceGroup) {
+      const o = p.options.find(x => x.key === p.priceGroup);
+      const c = o && o.choices.find(x => x.v === l.opts[p.priceGroup]);
+      if (c && c.price != null) return c.price;
+      return null;
+    }
+    return p.price;
+  }
+  const minPrice = p => {
+    if (p.priceGroup) {
+      const o = p.options.find(x => x.key === p.priceGroup);
+      const ps = o ? o.choices.map(c => c.price).filter(v => v != null) : [];
+      return ps.length ? Math.min(...ps) : null;
+    }
+    return p.price;
+  };
 
   function addLine(id, opts, qty) {
     const key = lineKey(id, opts);
@@ -59,8 +83,8 @@
   function totals() {
     let count = 0, total = 0, hasFrom = false, unpriced = false;
     cart.forEach(l => {
-      const p = byId.get(l.id); count += l.qty;
-      if (p.price == null) unpriced = true; else total += p.price * l.qty;
+      const p = byId.get(l.id), u = unitPrice(l); count += l.qty;
+      if (u == null) unpriced = true; else total += u * l.qty;
       if (p.from) hasFrom = true;
     });
     return { count, total, hasFrom, unpriced, lines: cart.length };
@@ -68,22 +92,17 @@
   function needs72() {
     return cart.some(l => {
       const p = byId.get(l.id);
-      if (p.lead72) return true;
-      return (p.options || []).some(o => (o.choices || []).some(c => c.lead72 && [].concat(l.opts[o.key] || []).includes(c.v)));
+      if (p.delay) return true;
+      return (p.options || []).some(o => (o.choices || []).some(c => c.delay && [].concat(l.opts[o.key] || []).includes(c.v)));
     });
   }
   const describeOpts = (p, opts) => (p.options || []).map(o => {
     const v = [].concat(opts[o.key] || []); if (!v.length) return null;
     return o.label.replace(/\s*\(.*\)/, '') + ' : ' + v.join(', ');
   }).filter(Boolean);
+  const totalLabel = t => (t.total === 0 && t.unpriced) ? 'Sur devis' : (t.hasFrom || t.unpriced ? 'dès ' : '') + eur(t.total) + ' HT';
 
-  /* ---------- Rendu : éléments communs ---------- */
-  const priceHTML = p => p.price == null
-    ? '<span class="price"><b>Sur devis</b></span>'
-    : `<span class="price">${p.from ? '<small class="from">à partir de</small>' : ''}<b>${eur(p.price)}</b><small>HT${p.unit ? ' / ' + esc(p.unit) : ''}</small></span>`;
-  const tagsHTML = p => (p.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
-  const leadHTML = p => p.lead72 ? `<span class="lead72" title="À commander 72 h à l’avance">${ICON.clock}Commande 72 h avant</span>` : '';
-
+  /* ---------- Boutons des cartes (rendu côté serveur + améliorations ici) ---------- */
   function stepperHTML(key, qty, sm, prefix) {
     const k = esc(key), f = hid(key);
     return `<div class="stepper${sm ? ' sm' : ''}" role="group" aria-label="Quantité">
@@ -93,75 +112,29 @@
     </div>`;
   }
   function controlHTML(p) {
-    const hasChoice = !!(p.options && p.options.length);
-    if (hasChoice) return `<button type="button" class="add-btn" data-action="open-product" data-id="${p.id}" data-fid="add-${p.id}">${ICON.plus}Choisir</button>`;
+    if (p.options && p.options.length) return `<button type="button" class="add-btn" data-action="open-product" data-id="${p.id}" data-fid="add-${p.id}">${ICON.plus}Ajouter à ma demande</button>`;
     const key = lineKey(p.id, {}), l = findLine(key);
     if (l) return stepperHTML(key, l.qty, false, '');
-    return `<button type="button" class="add-btn" data-action="quick-add" data-id="${p.id}" data-fid="add-${p.id}">${ICON.plus}Ajouter</button>`;
+    return `<button type="button" class="add-btn" data-action="quick-add" data-id="${p.id}" data-fid="add-${p.id}">${ICON.plus}Ajouter à ma demande</button>`;
   }
-  const hasDetail = p => !!(p.options || p.items || p.details || p.note);
-
-  function cardHTML(p) {
-    const g = groupById.get(p.group), img = p.img || g.img, q = qtyOf(p.id);
-    const teaser = (p.items || []).join(' · ');
-    return `<article class="card" data-id="${p.id}">
-      <div class="card-media">${img ? `<img src="assets/img/${img}.jpg" alt="" loading="lazy">` : '<div class="noimg"></div>'}${q ? `<span class="in-cart">${q} dans ma demande</span>` : ''}</div>
-      <div class="card-body">
-        <h4 class="card-title"><button type="button" data-action="open-product" data-id="${p.id}">${esc(p.name)}</button></h4>
-        ${p.sub ? `<p class="card-sub">${esc(p.sub)}</p>` : ''}
-        ${teaser ? `<p class="card-teaser">${esc(teaser)}</p>` : ''}
-        ${(p.tags || p.lead72) ? `<div class="meta">${tagsHTML(p)}${leadHTML(p)}</div>` : ''}
-        <div class="card-foot">${priceHTML(p)}<div class="ctrl">${controlHTML(p)}</div></div>
-      </div></article>`;
+  function refreshProduct(id) {
+    const p = byId.get(id); if (!p) return;
+    const q = qtyOf(id);
+    $$(`[data-ctrl="${id}"]`).forEach(c => { c.innerHTML = controlHTML(p); });
+    $$(`.card[data-id="${id}"] .in-cart`).forEach(b => { b.hidden = !q; b.textContent = q + ' dans ma demande'; });
+    $$(`.row[data-id="${id}"] .in-cart-inline`).forEach(b => { b.hidden = !q || !(p.options && p.options.length); b.textContent = q + ' dans ma demande'; });
   }
-  function rowHTML(p) {
-    const q = qtyOf(p.id);
-    const name = hasDetail(p) ? `<button type="button" data-action="open-product" data-id="${p.id}">${esc(p.name)}</button>` : esc(p.name);
-    return `<li class="row" data-id="${p.id}">
-      <div class="row-info"><div class="row-name">${name}</div>${p.sub ? `<p class="row-sub">${esc(p.sub)}</p>` : ''}${tagsHTML(p)}${q && p.options ? `<span class="in-cart-inline">${q} dans ma demande</span>` : ''}</div>
-      <div class="row-act">${priceHTML(p)}<div class="ctrl">${controlHTML(p)}</div></div></li>`;
-  }
-  const productHTML = p => groupById.get(p.group).layout === 'rows' ? rowHTML(p) : cardHTML(p);
-
-  /* ---------- Catalogue ---------- */
-  let currentTab = C.tabs[0].id;
-
-  function renderTabs() {
+  function refreshCategoryDots() {
     const counts = {};
-    cart.forEach(l => { const t = tabOf(byId.get(l.id)); counts[t] = (counts[t] || 0) + 1; });
-    $('#tabs').innerHTML = C.tabs.map(t => `<button type="button" role="tab" class="tab" id="tab-${t.id}" data-action="tab" data-tab="${t.id}" aria-selected="${t.id === currentTab}" aria-controls="catalog" tabindex="${t.id === currentTab ? 0 : -1}">${esc(t.label)}${counts[t.id] ? `<span class="dot" aria-label="${counts[t.id]} sélection(s)">${counts[t.id]}</span>` : ''}</button>`).join('');
-  }
-  function renderCatalog() {
-    const groups = C.groups.filter(g => g.tab === currentTab);
-    const html = groups.map(g => {
-      const items = C.products.filter(p => p.group === g.id);
-      const head = `<div class="group-head">${g.eyebrow ? `<p class="eyebrow">${esc(g.eyebrow)}</p>` : ''}<h3 id="g-${g.id}">${esc(g.title)}</h3>${g.intro ? `<p class="intro">${esc(g.intro)}</p>` : ''}</div>`;
-      let body;
-      if (g.layout === 'rows') {
-        body = `<div class="rows-wrap${g.img ? ' has-media' : ''}">${g.img ? `<div class="rows-media"><img src="assets/img/${g.img}.jpg" alt="" loading="lazy"></div>` : ''}<ul class="rows">${items.map(rowHTML).join('')}</ul></div>`;
-      } else {
-        body = `<div class="cards">${items.map(cardHTML).join('')}</div>`;
-      }
-      return `<section class="group" aria-labelledby="g-${g.id}">${head}${body}${g.note ? `<p class="group-note">${esc(g.note)}</p>` : ''}</section>`;
-    }).join('');
-    const others = ['douceurs', 'boissons'].filter(t => t !== currentTab && C.tabs.some(x => x.id === t));
-    const hint = currentTab === 'boissons' ? '' :
-      `<div class="hint-box">Pensez à compléter votre commande : ${others.map(t => `<button type="button" class="link-btn" data-action="goto-tab" data-tab="${t}">${esc(C.tabs.find(x => x.id === t).label)}</button>`).join(' · ')}</div>`;
-    $('#catalog').innerHTML = html + hint;
-    $('#catalog').setAttribute('aria-labelledby', 'tab-' + currentTab);
-  }
-  function selectTab(id, opts) {
-    if (!C.tabs.some(t => t.id === id)) id = C.tabs[0].id;
-    currentTab = id;
-    renderTabs(); renderCatalog();
-    try { history.replaceState(null, '', '#carte-' + id); } catch (e) { /* file:// */ }
-    const sel = $('#tab-' + id); if (sel && sel.scrollIntoView) sel.scrollIntoView({ inline: 'center', block: 'nearest' });
-    if (opts && opts.focus) sel.focus({ preventScroll: true });
-    const top = $('#catalog').getBoundingClientRect().top + window.scrollY - $('.site-header').offsetHeight - $('#tabsBar').offsetHeight - 8;
-    if (!(opts && opts.noScroll) && window.scrollY > top) window.scrollTo({ top, behavior: 'auto' });
+    cart.forEach(l => { const c = byId.get(l.id).cat; counts[c] = (counts[c] || 0) + 1; });
+    $$('[data-cat-link]').forEach(a => {
+      const d = $('.dot', a); if (!d) return;
+      const n = counts[a.dataset.catLink] || 0;
+      d.hidden = !n; d.textContent = n;
+      d.setAttribute('aria-label', n + ' sélection(s)');
+    });
   }
 
-  /* ---------- Rafraîchissement ciblé après changement du panier ---------- */
   function restoreFocus(fid) {
     if (!fid) return;
     const el = document.querySelector(`[data-fid="${fid}"]`);
@@ -170,28 +143,18 @@
   function changed(ids) {
     persist();
     const fid = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fid : null;
-    (ids || []).forEach(id => {
-      const p = byId.get(id); if (!p) return;
-      const old = $(`#catalog [data-id="${id}"].card, #catalog [data-id="${id}"].row`);
-      if (!old) return;
-      const tpl = document.createElement('template'); tpl.innerHTML = productHTML(p).trim();
-      old.replaceWith(tpl.content.firstElementChild);
-    });
+    (ids || []).forEach(refreshProduct);
     const t = totals();
     $('#headerCount').hidden = t.count === 0; $('#headerCount').textContent = t.count;
-    const bar = $('#cartBar');
-    bar.hidden = t.count === 0 || $('#quoteDialog').open;
+    const bar = $('#cartBar'), quoteOpen = $('#quoteDialog').open;
+    bar.hidden = t.count === 0 || quoteOpen;
     document.body.classList.toggle('has-bar', !bar.hidden);
-    $('#barCount').textContent = t.count + (t.count > 1 ? ' articles' : ' article');
+    $('#barCount').textContent = t.count + (t.count > 1 ? ' produits' : ' produit');
     $('#barTotal').textContent = totalLabel(t);
-    renderTabs();
-    if ($('#quoteDialog').open && step === 1) renderStep1();
+    refreshCategoryDots();
+    if (quoteOpen && step === 1) renderStep1();
     refreshFoot();
     restoreFocus(fid);
-  }
-  function totalLabel(t) {
-    if (t.total === 0 && t.unpriced) return 'Sur devis';
-    return (t.hasFrom || t.unpriced ? 'dès ' : '') + eur(t.total) + ' HT';
   }
 
   /* ---------- Dialogues ---------- */
@@ -206,53 +169,84 @@
   let toastTimer;
   function toast(msg) {
     const t = $('#toast'); t.textContent = msg; t.hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2800);
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
   }
 
   /* ---------- Fiche produit ---------- */
   let sheet = null; // { id, qty, opts }
+  const tagText = t => C.tags[t] || '';
+
+  function infoRows(p) {
+    const rows = [];
+    rows.push(['Commande', p.delay ? (tagText(p.delay) || `À commander ${delayLabel(p.delay)} à l’avance (jour ouvré).`) : 'Commande passée avant 12h00 : livraison possible le lendemain.']);
+    p.tags.forEach(t => { const x = tagText(t); if (x) rows.push([t.charAt(0).toUpperCase() + t.slice(1), x]); });
+    if (p.food) rows.push(['Conservation', 'À consommer froid, sauf indication contraire. Conserver entre 0 et 4 °C et consommer dans les 6 heures suivant la livraison.']);
+    rows.push(['Livraison', 'Livré sans service, à l’adresse de votre choix. Frais de livraison précisés dans votre devis.']);
+    if (p.food) rows.push(['Allergies', 'Indiquez vos allergies et régimes dans votre demande : Calixir vous répondra dans le devis.']);
+    return rows;
+  }
   function openProduct(id) {
     const p = byId.get(id); if (!p) return;
     sheet = { id, qty: 1, opts: {} };
-    const g = groupById.get(p.group), img = p.img || g.img;
-    const body = `
-      ${img ? `<div class="pd-media"><img src="assets/img/${img}.jpg" alt=""></div>` : '<div style="height:20px"></div>'}
+    const tagsHtml = p.tags.map(t => `<span class="tag">${esc(t.charAt(0).toUpperCase() + t.slice(1))}</span>`).join('');
+    const leadHtml = p.delay ? `<span class="lead72">${ICON.clock}Commande ${delayLabel(p.delay)} avant</span>` : '';
+    const min = minPrice(p);
+    const priceHtml = min == null ? '<b>Sur devis</b>' : `<b>${eur(min)}</b><span>HT${(p.from || p.priceGroup) ? ' · à partir de' : ''}${p.unit ? ' · par ' + esc(p.unit) : ''}</span>`;
+    const listTitle = /^(plateau|menu|pause-box|lunchbox)/.test(p.id) ? 'Comprend' : 'Composition';
+    $('#pdBody').innerHTML = `
+      ${p.img ? `<div class="pd-media"><img src="${IMG + esc(p.img)}" alt=""></div>` : '<div style="height:20px"></div>'}
       <div class="pd-body">
         <h2 id="pdTitle">${esc(p.name)}</h2>
         ${p.sub ? `<p class="pd-sub">${esc(p.sub)}</p>` : ''}
-        <div class="pd-price">${p.price == null ? '<b>Sur devis</b>' : `<b>${eur(p.price)}</b><span>HT${p.from ? ' · à partir de' : ''}${p.unit ? ' · par ' + esc(p.unit) : ''}</span>`}</div>
-        ${(p.tags || p.lead72) ? `<div class="pd-meta">${tagsHTML(p)}${leadHTML(p)}</div>` : ''}
-        ${p.items ? `<div class="pd-list"><h4>${p.id.startsWith('plateau') || p.id === 'pause-box' || p.id === 'lunchbox' ? 'Comprend' : 'Composition'}</h4><ul>${p.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>` : ''}
+        <div class="pd-price">${priceHtml}</div>
+        ${(tagsHtml || leadHtml) ? `<div class="pd-meta">${tagsHtml}${leadHtml}</div>` : ''}
+        ${p.items.length ? `<div class="pd-list"><h4>${listTitle}</h4><ul>${p.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>` : ''}
         ${p.note ? `<p class="pd-note">${esc(p.note)}</p>` : ''}
         ${(p.details || []).map(d => `<details class="pd-details"><summary>${esc(d.title)}</summary><ul>${d.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></details>`).join('')}
         ${(p.options || []).map(o => `
-          <fieldset class="opt-group" data-opt="${o.key}">
+          <fieldset class="opt-group" data-opt="${esc(o.key)}">
             <legend>${esc(o.label)}${o.required ? '<span class="req">à choisir</span>' : ''}</legend>
-            ${o.choices.map((c, i) => `<label class="tile"><input type="${o.type === 'check' ? 'checkbox' : 'radio'}" name="opt-${o.key}" value="${esc(c.v)}"><span class="tile-text">${esc(c.v)}${(c.sub || c.lead72) ? `<small>${esc([c.sub, c.lead72 ? 'commande 72 h avant' : ''].filter(Boolean).join(' · '))}</small>` : ''}</span></label>`).join('')}
+            ${o.choices.map(c => `<label class="tile"><input type="${o.type === 'check' ? 'checkbox' : 'radio'}" name="opt-${esc(o.key)}" value="${esc(c.v)}"><span class="tile-text">${esc(c.v)}${(c.sub || c.delay) ? `<small>${esc([c.sub, c.delay ? 'commande ' + delayLabel(c.delay) + ' avant' : ''].filter(Boolean).join(' · '))}</small>` : ''}</span>${c.price != null ? `<span class="tile-price">${eur(c.price)}</span>` : ''}</label>`).join('')}
             <p class="opt-error" hidden>Merci de faire un choix.</p>
           </fieldset>`).join('')}
+        <div class="pd-info"><h4>Informations utiles</h4><dl>${infoRows(p).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></div>
       </div>`;
-    $('#pdBody').innerHTML = body;
     $('#pdFoot').innerHTML = `${stepperHTML('sheet', 1, false, 'sheet-')}<button type="button" class="btn btn-primary" data-action="sheet-add" id="sheetAdd"></button>`;
     updateSheetBtn();
-    $('#pdBody').scrollTop = 0;
     openDialog($('#productDialog'));
+    $('#pdBody').scrollTop = 0;
+  }
+  function sheetUnit() {
+    const p = byId.get(sheet.id);
+    if (p.priceGroup) {
+      const o = p.options.find(x => x.key === p.priceGroup), v = sheet.opts[p.priceGroup];
+      const c = o && o.choices.find(x => x.v === v);
+      return c && c.price != null ? c.price : null;
+    }
+    return p.price;
   }
   function updateSheetBtn() {
-    const p = byId.get(sheet.id);
     const b = $('#sheetAdd'); if (!b) return;
-    b.textContent = p.price == null ? 'Ajouter à ma demande' : `Ajouter · ${eur(p.price * sheet.qty)} HT`;
+    const u = sheetUnit();
+    b.innerHTML = u == null ? '<span>Ajouter à ma demande</span>' : `<span>Ajouter à ma demande</span><small>${eur(u * sheet.qty)} HT</small>`;
     $('#pdFoot input[data-action="sheet-qty"]').value = sheet.qty;
   }
-  function addFromSheet() {
-    const p = byId.get(sheet.id); let first = null;
+  function readSheetOpts() {
+    const p = byId.get(sheet.id);
     (p.options || []).forEach(o => {
       const fs = $(`.opt-group[data-opt="${o.key}"]`, $('#pdBody'));
       const vals = $$('input:checked', fs).map(i => i.value);
-      const missing = o.required && vals.length === 0;
+      if (vals.length) sheet.opts[o.key] = o.type === 'check' ? vals : vals[0]; else delete sheet.opts[o.key];
+    });
+  }
+  function addFromSheet() {
+    const p = byId.get(sheet.id); let first = null;
+    readSheetOpts();
+    (p.options || []).forEach(o => {
+      const fs = $(`.opt-group[data-opt="${o.key}"]`, $('#pdBody'));
+      const missing = o.required && !sheet.opts[o.key];
       fs.classList.toggle('has-error', missing); $('.opt-error', fs).hidden = !missing;
       if (missing && !first) first = fs;
-      if (vals.length) sheet.opts[o.key] = o.type === 'check' ? vals : vals[0]; else delete sheet.opts[o.key];
     });
     if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     addLine(sheet.id, Object.assign({}, sheet.opts), sheet.qty);
@@ -262,10 +256,10 @@
 
   /* ---------- Tiroir « Ma demande de devis » ---------- */
   let step = 1, sendMode = null, sendError = '';
-  const STEPS = [1, 2, 3, 4];
+  const PROGRESS_STEPS = 4;
 
   function openQuote(n) {
-    $('#productDialog').open && $('#productDialog').close();
+    if ($('#productDialog').open) $('#productDialog').close();
     sendMode = null; sendError = '';
     bindFormValues(); updateDateMin();
     goStep(n || 1, true);
@@ -274,35 +268,55 @@
   }
   function goStep(n, silent) {
     step = n;
-    STEPS.forEach(s => { $('#qStep' + s).hidden = s !== n; });
+    for (let s = 1; s <= 5; s++) $('#qStep' + s).hidden = s !== n;
     $$('#qProgress li').forEach(li => {
       const s = Number(li.dataset.step);
       li.classList.toggle('is-active', s === n); li.classList.toggle('is-done', s < n);
       if (s === n) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current');
     });
-    $('#qProgress').classList.toggle('is-hidden', n === 4);
+    $('#qProgress').classList.toggle('is-hidden', n === 5);
     if (n === 1) renderStep1();
+    if (n === 2 || n === 3) renderSelSummary();
     if (n === 4) renderStep4();
+    if (n === 5) renderStep5();
     refreshFoot();
     $('#qBody').scrollTop = 0;
     if (!silent) { const h = $('#qStep' + n + ' .step-title, #qStep' + n + ' h3'); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
   }
 
+  /* Avertissements doux, tirés des conditions de vente (jamais bloquants). */
+  const isWeekend = ymdStr => { if (!ymdStr) return false; const d = parseYmd(ymdStr).getDay(); return d === 0 || d === 6; };
+  function minOrderNotice() {
+    const t = totals();
+    if (!cart.length || t.unpriced || !cfg.minTtcWeek) return '';
+    const wk = isWeekend(form.date) ? cfg.minTtcWeekend : cfg.minTtcWeek;
+    if (t.total * 1.10 >= wk) return '';
+    return `Minimum de commande : ${wk} € TTC hors frais de livraison${isWeekend(form.date) ? ' le week-end' : ' en semaine'} (${cfg.minTtcWeekend} € TTC les week-ends et jours fériés). Votre sélection semble inférieure : ajoutez des produits ou envoyez-la tout de même, Calixir vous confirmera.`;
+  }
+  function varietyNotice() {
+    const menus = new Set(cart.filter(l => byId.get(l.id).cat === 'plateaux-repas').map(l => l.id));
+    if (!menus.size) return '';
+    const g = Number(form.guests) || 0, max = g && g <= 15 ? 3 : 4;
+    if (menus.size <= max) return '';
+    return `Plateaux repas : ${g && g <= 15 ? '3 variétés maximum jusqu’à 15 personnes' : '4 variétés maximum au-delà de 15 personnes'}. Votre sélection en compte ${menus.size} : Calixir vous proposera un ajustement.`;
+  }
+
   function renderStep1() {
     const el = $('#qStep1'), t = totals();
     if (!cart.length) {
-      el.innerHTML = `<div class="empty"><h3>Votre demande est vide</h3><p>Ajoutez des plateaux, coffrets ou boissons depuis la carte pour préparer votre devis.</p><button type="button" class="btn btn-primary" data-action="close-dialog">Parcourir la carte</button></div>`;
+      el.innerHTML = `<div class="empty"><h3>Votre demande est vide</h3><p>Ajoutez des plateaux, coffrets ou boissons depuis la carte pour préparer votre devis. Aucun paiement n’est demandé.</p><button type="button" class="btn btn-primary" data-action="close-dialog">Parcourir la carte</button></div>`;
       return;
     }
+    const notices = [minOrderNotice(), varietyNotice()].filter(Boolean);
     el.innerHTML = `
       <h3 class="step-title">Votre sélection</h3>
       <ul class="lines">${cart.map(l => {
-        const p = byId.get(l.id), opts = describeOpts(p, l.opts);
+        const p = byId.get(l.id), opts = describeOpts(p, l.opts), u = unitPrice(l);
         return `<li class="line">
-          <div><div class="line-name">${esc(p.name)}${p.sub && p.group !== 'lunchbag' ? ` <span class="line-unit">· ${esc(p.sub)}</span>` : ''}</div>
+          <div><div class="line-name">${esc(p.name)}${p.sub ? ` <span class="line-unit">· ${esc(p.sub)}</span>` : ''}</div>
             ${opts.length ? `<p class="line-opts">${opts.map(esc).join('<br>')}</p>` : ''}
-            <span class="line-unit">${p.price == null ? 'Prix sur devis' : (p.from ? 'à partir de ' : '') + eur(p.price) + ' HT l’unité'}</span></div>
-          <div class="line-total">${p.price == null ? '—' : eur(p.price * l.qty)}</div>
+            <span class="line-unit">${u == null ? 'Prix sur devis' : (p.from ? 'à partir de ' : '') + eur(u) + ' HT l’unité'}</span></div>
+          <div class="line-total">${u == null ? '—' : eur(u * l.qty)}</div>
           <div class="line-ctrl">${stepperHTML(l.key, l.qty, true, 'line-')}<button type="button" class="line-del" data-action="line-remove" data-key="${esc(l.key)}">Retirer</button></div>
         </li>`;
       }).join('')}</ul>
@@ -310,19 +324,29 @@
         <div class="total-row"><span>Estimation ${t.hasFrom || t.unpriced ? '(prix de départ)' : ''}</span><b>${totalLabel(t)}</b></div>
         <p>Estimation indicative hors frais de livraison et TVA. Calixir vous envoie un devis définitif, avec les frais de livraison selon votre adresse.</p>
       </div>
+      ${notices.map(n => `<p class="notice">${esc(n)}</p>`).join('')}
       <button type="button" class="btn btn-ghost add-more" data-action="close-dialog">+ Ajouter d’autres produits</button>`;
+  }
+  function renderSelSummary() {
+    const t = totals();
+    const html = `<details class="sel-summary"><summary><span>Ma sélection · ${t.count} produit${t.count > 1 ? 's' : ''}</span><span>${esc(totalLabel(t))}</span></summary><ul>${cart.map(l => {
+      const p = byId.get(l.id), o = describeOpts(p, l.opts);
+      return `<li><span>${l.qty} × ${esc(p.name)}${o.length ? `<span class="opts">${o.map(esc).join(' · ')}</span>` : ''}</span><span>${unitPrice(l) == null ? '—' : eur(unitPrice(l) * l.qty)}</span></li>`;
+    }).join('')}</ul></details>`;
+    $$('.sel-slot').forEach(s => { s.innerHTML = cart.length ? html : ''; });
   }
 
   function refreshFoot() {
     const f = $('#qFoot'); if (!f) return;
     const t = totals();
-    const est = `<div class="est"><span>Estimation HT</span><b>${totalLabel(t)}</b></div>`;
-    if (step === 1) f.innerHTML = cart.length ? `${est}<span class="grow"></span><button type="button" class="btn btn-primary" data-action="next">Continuer</button>` : '<span class="grow"></span>';
+    const est = `<div class="est"><span>Estimation HT</span><b>${esc(totalLabel(t))}</b></div>`;
+    if (step === 1) f.innerHTML = cart.length ? `${est}<span class="grow"></span><button type="button" class="btn btn-primary" data-action="next">Demander un devis</button>` : '<span class="grow"></span>';
     else if (step === 2) f.innerHTML = `<button type="button" class="btn btn-ghost" data-action="back">Retour</button>${est}<span class="grow"></span><button type="button" class="btn btn-primary" data-action="next">Continuer</button>`;
-    else if (step === 3) f.innerHTML = `<button type="button" class="btn btn-ghost" data-action="back">Retour</button>${est}<span class="grow"></span><button type="button" class="btn btn-primary" data-action="send" id="sendBtn">${cfg.endpoint ? 'Envoyer ma demande' : 'Valider ma demande'}</button>`;
+    else if (step === 3) f.innerHTML = `<button type="button" class="btn btn-ghost" data-action="back">Retour</button>${est}<span class="grow"></span><button type="button" class="btn btn-primary" data-action="next">Voir le récapitulatif</button>`;
+    else if (step === 4) f.innerHTML = `<button type="button" class="btn btn-ghost" data-action="back">Retour</button><span class="grow"></span><button type="button" class="btn btn-primary" data-action="send" id="sendBtn">Envoyer ma demande de devis</button>`;
     else f.innerHTML = sendMode === 'endpoint'
       ? '<span class="grow"></span><button type="button" class="btn btn-primary" data-action="finish">Terminer</button>'
-      : '<button type="button" class="btn btn-ghost" data-action="back-edit">Modifier ma demande</button><span class="grow"></span><button type="button" class="btn btn-ghost" data-action="close-dialog">Fermer</button>';
+      : '<button type="button" class="btn btn-ghost" data-action="goto-step" data-step="4">Revoir ma demande</button><span class="grow"></span><button type="button" class="btn btn-ghost" data-action="close-dialog">Fermer</button>';
   }
 
   /* ----- Formulaires : valeurs, validation ----- */
@@ -349,20 +373,28 @@
   function updateDateMin() {
     const min = startOfToday(); min.setDate(min.getDate() + 1);
     $('#f-date').min = ymd(min);
-    updateDateHint();
+    updateDateHint(); updateTimeHint();
   }
   function updateDateHint() {
     const hint = $('#dateHint'), v = $('#f-date').value; const msgs = [];
     if (v) {
-      const today = startOfToday(), d = parseYmd(v), diff = Math.round((d - today) / 864e5);
+      const now = new Date(), today = startOfToday(), d = parseYmd(v), diff = Math.round((d - today) / 864e5);
       if (needs72() && diff < 3) msgs.push('Certains produits de votre sélection se commandent 72 h à l’avance : Calixir vous confirmera si cette date est possible.');
+      if (diff === 1 && now.getHours() >= 12) msgs.push('Les commandes passées après 12h00 ne sont pas garanties pour le lendemain : appelez-nous au ' + cfg.phone + '.');
       const dow = today.getDay();
       if (dow === 6 || dow === 0) {
         const monday = new Date(today); monday.setDate(monday.getDate() + (dow === 6 ? 2 : 1));
         if (d <= monday) msgs.push('Les commandes ne sont pas prises le week-end pour une livraison du même week-end ou du lundi suivant. Appelez-nous au ' + cfg.phone + '.');
       }
+      if (isWeekend(v) && cfg.minTtcWeekend) msgs.push(`Livraison un week-end : minimum de commande de ${cfg.minTtcWeekend} € TTC hors frais de livraison.`);
     }
     hint.hidden = !msgs.length; hint.className = 'hint' + (msgs.length ? ' warn' : ''); hint.textContent = msgs.join(' ');
+  }
+  function updateTimeHint() {
+    const h = $('#timeHint'), v = $('#f-timeFrom').value;
+    const out = v && (v < '07:00' || v > '19:30');
+    h.hidden = !out; h.className = 'hint' + (out ? ' warn' : '');
+    h.textContent = out ? 'Nos livraisons se font entre 7h et 19h30 : Calixir vous contactera pour confirmer cet horaire.' : '';
   }
   function fieldError(el, msg) {
     const wrap = el.closest('.field'); if (!wrap) return;
@@ -389,57 +421,60 @@
       else if (v.rangeUnderflow && el.type === 'date') msg = 'Choisissez une date à partir de demain.';
       else if (v.rangeUnderflow) msg = 'Indiquez au moins 1.';
       else if (!v.valid) msg = 'Valeur invalide.';
-      if (!msg && el.name === 'timeTo' && $('#f-timeFrom').value && el.value <= $('#f-timeFrom').value) msg = 'L’heure de fin doit être après l’heure de début.';
       if (!msg && el.name === 'phone' && el.value.replace(/\D/g, '').length < 8) msg = 'Numéro de téléphone invalide.';
       if (msg) { fieldError(el, msg); if (!first) first = el; }
     });
+    const to = $('#f-timeTo');
+    if (sel === '#qStep2' && to.value && $('#f-timeFrom').value && to.value <= $('#f-timeFrom').value) { clearError(to); fieldError(to, 'Doit être après l’heure de livraison souhaitée.'); if (!first) first = to; }
     if (first) first.focus();
     return !first;
   }
 
   /* ----- Récapitulatif ----- */
   const longDate = s => parseYmd(s).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const newRef = () => { const d = new Date(); const r = Math.random().toString(36).slice(2, 6).toUpperCase(); return 'DV-' + String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + r; };
+  const addressText = () => [form.address, [form.zip, form.city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const timeText = () => (form.timeFrom || '') + (form.timeTo ? ' (au plus tard ' + form.timeTo + ')' : '');
+
   function buildRecap() {
     const t = totals();
     const lines = cart.map(l => {
-      const p = byId.get(l.id);
-      return { qty: l.qty, name: p.name + (p.sub && p.group !== 'lunchbag' ? ' (' + p.sub + ')' : ''), options: describeOpts(p, l.opts), unit: p.price, from: !!p.from, total: p.price == null ? null : p.price * l.qty };
+      const p = byId.get(l.id), u = unitPrice(l);
+      return { qty: l.qty, name: p.name + (p.sub ? ' (' + p.sub + ')' : ''), options: describeOpts(p, l.opts), unit: u, from: !!p.from, total: u == null ? null : u * l.qty };
     });
     const who = [form.firstName, form.lastName].filter(Boolean).join(' ');
     const out = [];
-    out.push('DEMANDE DE DEVIS · Calixir Paris (offre livrée sans service)', '');
+    out.push('DEMANDE DE DEVIS (et non commande) · Calixir Paris, offre livrée' + (form.ref ? ' · Réf. ' + form.ref : ''), '');
     out.push('CONTACT');
-    out.push('Nom : ' + who + (form.company ? ' · ' + form.company : ''));
+    out.push('Société : ' + (form.company || ''));
+    out.push('Nom : ' + who);
     out.push('E-mail : ' + (form.email || '')); out.push('Téléphone : ' + (form.phone || ''));
+    if (form.po) out.push('N° de bon de commande / référence : ' + form.po);
     if (form.billDiff && form.billing) out.push('Facturation : ' + form.billing.replace(/\s*\n\s*/g, ', '));
     out.push('', 'LIVRAISON');
     out.push('Date : ' + (form.date ? longDate(form.date) : ''));
-    out.push('Créneau souhaité : de ' + (form.timeFrom || '') + ' à ' + (form.timeTo || ''));
-    out.push('Convives : ' + (form.guests || ''));
-    out.push('Adresse : ' + [form.address, [form.zip, form.city].filter(Boolean).join(' ')].filter(Boolean).join(', '));
+    out.push('Heure souhaitée : ' + timeText());
+    out.push('Nombre de personnes : ' + (form.guests || ''));
+    out.push('Adresse : ' + addressText());
     if (form.access) out.push('Accès : ' + form.access.replace(/\s*\n\s*/g, ' / '));
     if (form.diet && form.diet.length) out.push('Régimes : ' + form.diet.join(', '));
-    if (form.notes) out.push('Précisions : ' + form.notes.replace(/\s*\n\s*/g, ' / '));
-    out.push('', 'SÉLECTION');
+    if (form.notes) out.push('Commentaires : ' + form.notes.replace(/\s*\n\s*/g, ' / '));
+    out.push('', 'PRODUITS SÉLECTIONNÉS');
     const selection = lines.map(l => {
       let s = '• ' + l.qty + ' × ' + l.name;
       if (l.options.length) s += '\n    ' + l.options.join('\n    ');
-      s += '\n    ' + (l.unit == null ? 'Prix sur devis' : (l.from ? 'à partir de ' : '') + eurTxt(l.unit) + ' HT l’unité' + ' → ' + eurTxt(l.total) + ' HT');
+      s += '\n    ' + (l.unit == null ? 'Prix sur devis' : (l.from ? 'à partir de ' : '') + eurTxt(l.unit) + ' HT l’unité → ' + eurTxt(l.total) + ' HT');
       return s;
     });
     const condensed = lines.map(l => '• ' + l.qty + ' × ' + l.name + (l.options.length ? ' [' + l.options.join(' ; ') + ']' : ''));
     out.push(...selection);
     const est = 'Estimation indicative : ' + (t.hasFrom || t.unpriced ? 'dès ' : '') + eurTxt(t.total) + ' HT (hors livraison et TVA)';
-    out.push('', est, '', 'Demande envoyée depuis le site Calixir Paris.');
-    const head = out.slice(0, out.indexOf('SÉLECTION') + 1);
-    return {
-      text: out.join('\n'),
-      short: [...head, ...condensed, '', est].join('\n'),
-      lines, estimate: t, who
-    };
+    out.push('', est, '', 'Demande envoyée depuis le site Calixir Paris (offre livrée).');
+    const head = out.slice(0, out.indexOf('PRODUITS SÉLECTIONNÉS') + 1);
+    return { text: out.join('\n'), short: [...head, ...condensed, '', est].join('\n'), lines, estimate: t, who };
   }
   function mailtoHref(r) {
-    const subject = `Demande de devis · ${r.who}${form.company ? ' (' + form.company + ')' : ''} · livraison du ${form.date ? parseYmd(form.date).toLocaleDateString('fr-FR') : ''}`;
+    const subject = `Demande de devis ${form.ref || ''} · ${form.company || r.who} · livraison du ${form.date ? parseYmd(form.date).toLocaleDateString('fr-FR') : ''}`;
     const make = body => `mailto:${cfg.toEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     let href = make(r.text), truncated = false;
     if (href.length > 1900) { href = make(r.short); truncated = true; }
@@ -453,27 +488,56 @@
   }
   function printRecap() {
     const r = buildRecap(), t = r.estimate;
-    $('#printArea').innerHTML = `<img src="assets/img/logo-horizontal.png" alt="Calixir Paris"><h1>Demande de devis</h1>
-      <p>${esc(r.who)}${form.company ? ' · ' + esc(form.company) : ''}<br>${esc(form.email || '')} · ${esc(form.phone || '')}</p>
-      <h2>Livraison</h2><p>${esc(form.date ? longDate(form.date) : '')}, de ${esc(form.timeFrom || '')} à ${esc(form.timeTo || '')} · ${esc(form.guests || '')} convives<br>${esc([form.address, [form.zip, form.city].filter(Boolean).join(' ')].filter(Boolean).join(', '))}${form.access ? '<br>' + esc(form.access) : ''}${form.diet && form.diet.length ? '<br>Régimes : ' + esc(form.diet.join(', ')) : ''}${form.notes ? '<br>' + esc(form.notes) : ''}</p>
-      <h2>Sélection</h2><table>${r.lines.map(l => `<tr><td>${l.qty} × ${esc(l.name)}${l.options.length ? '<br><small>' + l.options.map(esc).join(' · ') + '</small>' : ''}</td><td>${l.total == null ? 'sur devis' : eurTxt(l.total) + ' HT'}</td></tr>`).join('')}</table>
+    $('#printArea').innerHTML = `<img src="${ROOT}assets/img/brand/logo-horizontal.png" alt="Calixir Paris"><h1>Demande de devis</h1>
+      <p><strong>Ceci est une demande de devis, pas une commande.</strong>${form.ref ? ' Réf. ' + esc(form.ref) : ''}</p>
+      <p>${esc(form.company || '')}<br>${esc(r.who)} · ${esc(form.email || '')} · ${esc(form.phone || '')}</p>
+      <h2>Livraison</h2><p>${esc(form.date ? longDate(form.date) : '')}, ${esc(timeText())} · ${esc(form.guests || '')} personnes<br>${esc(addressText())}${form.access ? '<br>' + esc(form.access) : ''}${form.diet && form.diet.length ? '<br>Régimes : ' + esc(form.diet.join(', ')) : ''}${form.notes ? '<br>' + esc(form.notes) : ''}</p>
+      <h2>Produits sélectionnés</h2><table>${r.lines.map(l => `<tr><td>${l.qty} × ${esc(l.name)}${l.options.length ? '<br><small>' + l.options.map(esc).join(' · ') + '</small>' : ''}</td><td>${l.total == null ? 'sur devis' : eurTxt(l.total) + ' HT'}</td></tr>`).join('')}</table>
       <p><strong>Estimation indicative : ${t.hasFrom || t.unpriced ? 'dès ' : ''}${eurTxt(t.total)} HT</strong> (hors livraison et TVA)</p>`;
     window.print();
   }
 
+  /* Étape 4 : récapitulatif complet avant envoi */
   function renderStep4() {
-    const r = buildRecap();
-    const el = $('#qStep4');
+    const r = buildRecap(), t = r.estimate;
+    const notices = [minOrderNotice(), varietyNotice()].filter(Boolean);
+    const blk = (title, stepNo, inner) => `<section class="review-block"><div class="review-head"><h4>${title}</h4><button type="button" class="link-btn" data-action="goto-step" data-step="${stepNo}">Modifier</button></div>${inner}</section>`;
+    const dl = rows => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
+    $('#qStep4').innerHTML = `
+      <h3 class="step-title">Vérifiez votre demande</h3>
+      <p class="review-intro">Relisez les informations ci-dessous avant l’envoi. Vous pouvez tout modifier.</p>
+      ${blk('Produits sélectionnés', 1, `<ul class="review-lines">${r.lines.map(l => `<li><span>${l.qty} × ${esc(l.name)}${l.options.length ? `<span class="opts">${l.options.map(esc).join(' · ')}</span>` : ''}</span><span class="amt">${l.total == null ? 'sur devis' : eur(l.total)}</span></li>`).join('')}</ul>
+        <div class="total-row" style="margin-top:12px"><span>Estimation HT${t.hasFrom || t.unpriced ? ' (prix de départ)' : ''}</span><b>${esc(totalLabel(t).replace(' HT', ''))}</b></div>
+        <p class="line-unit" style="margin:6px 0 0">Hors frais de livraison et TVA. Le devis définitif vous est envoyé par Calixir.</p>`)}
+      ${blk('Livraison', 2, dl([
+        ['Date', form.date ? longDate(form.date) : ''], ['Heure souhaitée', timeText()], ['Personnes', form.guests],
+        ['Adresse', addressText()], form.access && ['Accès', form.access], form.diet && form.diet.length && ['Régimes', form.diet.join(', ')], form.notes && ['Commentaires', form.notes]]))}
+      ${blk('Coordonnées', 3, dl([
+        ['Société', form.company], ['Contact', r.who], ['E-mail', form.email], ['Téléphone', form.phone],
+        form.po && ['Réf. / bon de commande', form.po], form.billDiff && form.billing && ['Facturation', form.billing]]))}
+      ${notices.map(n => `<p class="notice">${esc(n)}</p>`).join('')}
+      <p class="legal-note"><strong>Il s’agit d’une demande de devis, pas d’une commande.</strong> Aucun paiement n’est demandé. Calixir vous répond avec un devis, valable 2 mois après son envoi ; la commande n’est définitive qu’une fois ce devis accepté. <a href="${ROOT}cgv/" target="_blank" rel="noopener">Conditions générales de vente</a></p>`;
+  }
+
+  /* Étape 5 : confirmation */
+  function renderStep5() {
+    const r = buildRecap(), el = $('#qStep5');
+    const ref = form.ref ? `<span class="ref">Réf. ${esc(form.ref)}</span>` : '';
+    const legal = `<p class="legal-note"><strong>Ceci est une demande de devis, et non une commande.</strong> Elle ne vous engage pas : la commande n’est validée qu’après acceptation du devis que Calixir vous enverra.</p>`;
     if (sendMode === 'endpoint') {
-      el.innerHTML = `<div class="done"><span class="badge">${ICON.check}</span><h3>Demande envoyée</h3>
-        <p>Merci ${esc(form.firstName || '')} ! Calixir a bien reçu votre demande et vous répondra par e-mail avec votre devis.</p>
+      el.innerHTML = `<div class="done"><span class="badge">${ICON.check}</span><h3>Votre demande de devis a bien été envoyée</h3>${ref}
+        <p>Merci ${esc(form.firstName || '')} ! Calixir a reçu votre demande et vous répond par e-mail avec votre devis personnalisé.</p>
+        ${legal}
+        <ol class="next-steps"><li><b>1</b><span>Calixir étudie votre demande (produits, quantités, livraison).</span></li><li><b>2</b><span>Vous recevez un devis par e-mail à ${esc(form.email || 'votre adresse')}, valable 2 mois.</span></li><li><b>3</b><span>Votre commande est confirmée lorsque vous acceptez ce devis.</span></li></ol>
+        <p class="muted" style="font-size:.88rem">Une question ? Appelez-nous au <a href="tel:${cfg.phoneHref}">${esc(cfg.phone)}</a> (${esc(cfg.hours)}).</p>
         <div class="recap">${esc(r.text)}</div></div>`;
       return;
     }
     const { href, truncated } = mailtoHref(r);
-    el.innerHTML = `<div class="done"><span class="badge">${ICON.check}</span><h3>Votre demande est prête</h3>
-      <p>Il reste une étape : envoyez-la à Calixir par e-mail, le message est déjà rédigé.</p>
+    el.innerHTML = `<div class="done"><span class="badge">${ICON.check}</span><h3>Votre demande de devis est prête</h3>${ref}
+      <p>Dernière étape : envoyez-la à Calixir par e-mail, le message est déjà rédigé.</p>
       ${sendError ? `<p class="send-error">${esc(sendError)}</p>` : ''}
+      ${legal}
       <div class="done-actions">
         <a class="btn btn-primary btn-lg" href="${esc(href)}" data-action="mail" data-truncated="${truncated}">Envoyer par e-mail</a>
         <button type="button" class="btn btn-ghost" data-action="copy">Copier le récapitulatif</button>
@@ -484,18 +548,19 @@
   }
 
   async function send() {
-    if (!validateSection('#qStep3')) return;
-    $$('#qStep3 [name]').forEach(readField);
-    if (form.website) { sendMode = 'endpoint'; return goStep(4); } // champ piège : on fait semblant
+    $$('#qStep2 [name], #qStep3 [name]').forEach(readField);
+    if (!form.ref) { form.ref = newRef(); persist(); }
+    if (form.website) { sendMode = 'endpoint'; return goStep(5); } // champ piège : on fait semblant
     sendError = '';
-    if (!cfg.endpoint) { sendMode = 'mail'; return goStep(4); }
+    if (!cfg.endpoint) { sendMode = 'mail'; return goStep(5); }
     const btn = $('#sendBtn'); btn.disabled = true; btn.textContent = 'Envoi en cours…';
     const r = buildRecap();
     const payload = {
-      _subject: `Demande de devis · ${r.who} · livraison du ${form.date ? parseYmd(form.date).toLocaleDateString('fr-FR') : ''}`,
-      email: form.email, name: r.who, company: form.company || '', phone: form.phone,
-      delivery: { date: form.date, from: form.timeFrom, to: form.timeTo, guests: form.guests, address: form.address, zip: form.zip, city: form.city, access: form.access || '' },
-      diet: form.diet || [], notes: form.notes || '', billing: form.billDiff ? form.billing : '',
+      _subject: `Demande de devis ${form.ref} · ${form.company || r.who} · livraison du ${form.date ? parseYmd(form.date).toLocaleDateString('fr-FR') : ''}`,
+      reference: form.ref, type: 'demande de devis (non commande)',
+      email: form.email, name: r.who, company: form.company || '', phone: form.phone, po: form.po || '',
+      delivery: { date: form.date, time: form.timeFrom, latest: form.timeTo || '', guests: form.guests, address: form.address, zip: form.zip, city: form.city, access: form.access || '' },
+      diet: form.diet || [], comments: form.notes || '', billing: form.billDiff ? form.billing : '',
       lines: r.lines, estimate: r.estimate, message: r.text
     };
     try {
@@ -505,18 +570,19 @@
     } catch (e) {
       sendMode = 'mail'; sendError = 'L’envoi automatique n’a pas abouti. Vous pouvez transmettre votre demande par e-mail ci-dessous.';
     }
-    goStep(4);
+    goStep(5);
   }
 
   /* ---------- Événements ---------- */
   document.addEventListener('click', e => {
+    const media = e.target.closest('.card-media, .card-teaser');
+    if (media && !e.target.closest('[data-action]')) { const c = media.closest('.card[data-id]'); if (c) { openProduct(c.dataset.id); return; } }
     const t = e.target.closest('[data-action]'); if (!t) return;
     const a = t.dataset.action, key = t.dataset.key;
     switch (a) {
-      case 'tab': selectTab(t.dataset.tab, { focus: true }); break;
-      case 'goto-tab': selectTab(t.dataset.tab, { noScroll: true }); $('#tabsBar').scrollIntoView({ behavior: 'smooth', block: 'start' }); break;
       case 'open-product': openProduct(t.dataset.id); break;
       case 'quick-add': addLine(t.dataset.id, {}, 1); break;
+      case 'add': { const p = byId.get(t.dataset.id); if (p && p.options.length) openProduct(p.id); else addLine(t.dataset.id, {}, 1); break; }
       case 'inc': case 'line-inc': setQty(key, findLine(key).qty + 1); break;
       case 'dec': case 'line-dec': setQty(key, findLine(key).qty - 1); break;
       case 'line-remove': setQty(key, 0); break;
@@ -524,16 +590,16 @@
       case 'sheet-dec': sheet.qty = Math.max(1, sheet.qty - 1); updateSheetBtn(); break;
       case 'sheet-add': addFromSheet(); break;
       case 'open-quote': openQuote(1); break;
-      case 'open-cgv': openDialog($('#cgvDialog')); $('#cgvDialog .sheet-scroll').scrollTop = 0; break;
       case 'close-dialog': t.closest('dialog').close(); break;
       case 'next':
         if (step === 1) goStep(2);
         else if (step === 2 && validateSection('#qStep2')) { $$('#qStep2 [name]').forEach(readField); goStep(3); }
+        else if (step === 3 && validateSection('#qStep3')) { $$('#qStep3 [name]').forEach(readField); if (!form.ref) { form.ref = newRef(); persist(); } goStep(4); }
         break;
       case 'back': goStep(step - 1); break;
-      case 'back-edit': goStep(1); break;
+      case 'goto-step': goStep(Number(t.dataset.step)); break;
       case 'send': send(); break;
-      case 'finish': cart = []; form.billDiff = false; changed(C.products.map(p => p.id)); $('#quoteDialog').close(); toast('Merci ! Votre demande est partie.'); break;
+      case 'finish': cart = []; form.billDiff = false; delete form.ref; changed(C.products.map(p => p.id)); $('#quoteDialog').close(); toast('Merci ! Votre demande de devis est partie.'); break;
       case 'copy': copyText(buildRecap().text).then(ok => toast(ok ? 'Récapitulatif copié' : 'Copie impossible : sélectionnez le texte à la main')); break;
       case 'print': printRecap(); break;
       case 'mail': if (t.dataset.truncated === 'true') copyText(buildRecap().text).then(ok => ok && toast('Récapitulatif complet copié : collez-le dans votre e-mail si besoin')); break;
@@ -547,6 +613,7 @@
       else setQty(t.dataset.key, t.value);
     } else if (t.closest('#pdBody') && t.matches('input')) {
       const fs = t.closest('.opt-group'); fs.classList.remove('has-error'); $('.opt-error', fs).hidden = true;
+      readSheetOpts(); updateSheetBtn();
     }
   });
   ['#qStep2', '#qStep3'].forEach(sel => {
@@ -555,25 +622,25 @@
       const el = e.target; if (!el.name) return;
       readField(el); clearError(el);
       if (el.name === 'date') updateDateHint();
+      if (el.name === 'timeFrom') updateTimeHint();
       if (el.name === 'billDiff') $('#billingField').hidden = !el.checked;
     });
     root.addEventListener('change', e => { if (e.target.name === 'billDiff') $('#billingField').hidden = !e.target.checked; });
     root.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') { e.preventDefault(); const b = $('#qFoot [data-action="next"], #qFoot [data-action="send"]'); if (b) b.click(); }
+      if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') { e.preventDefault(); const b = $('#qFoot [data-action="next"]'); if (b) b.click(); }
     });
   });
-  $('#tabs').addEventListener('keydown', e => {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
-    const ids = C.tabs.map(t => t.id); let i = ids.indexOf(currentTab);
-    if (e.key === 'ArrowRight') i = (i + 1) % ids.length; else if (e.key === 'ArrowLeft') i = (i - 1 + ids.length) % ids.length; else if (e.key === 'Home') i = 0; else i = ids.length - 1;
-    e.preventDefault(); selectTab(ids[i], { focus: true, noScroll: true });
-  });
+
+  /* Menu mobile */
+  const navBtn = $('.nav-toggle'), nav = $('#mainNav');
+  if (navBtn && nav) {
+    navBtn.addEventListener('click', () => { const open = nav.classList.toggle('is-open'); navBtn.setAttribute('aria-expanded', open); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && nav.classList.contains('is-open')) { nav.classList.remove('is-open'); navBtn.setAttribute('aria-expanded', 'false'); navBtn.focus(); } });
+  }
 
   /* ---------- Démarrage ---------- */
-  (function init() {
-    const m = /^#carte-([a-z]+)$/.exec(location.hash);
-    if (m) currentTab = C.tabs.some(t => t.id === m[1]) ? m[1] : currentTab;
-    renderTabs(); renderCatalog(); changed([]);
-    if (m) setTimeout(() => $('#carte').scrollIntoView(), 0);
-  })();
+  $$('[data-ctrl]').forEach(c => { const p = byId.get(c.dataset.ctrl); if (p) c.innerHTML = controlHTML(p); });
+  C.products.forEach(p => { if (qtyOf(p.id)) refreshProduct(p.id); });
+  changed([]);
+  if (/^#p-/.test(location.hash)) { const el = document.getElementById(location.hash.slice(1)); if (el) setTimeout(() => el.scrollIntoView({ block: 'center' }), 50); }
 })();
