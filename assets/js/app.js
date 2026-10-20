@@ -139,6 +139,13 @@
       <button type="button" data-action="${prefix}inc" data-key="${k}" data-fid="inc-${f}" aria-label="Ajouter un">${ICON.plus}</button>
     </div>`;
   }
+  /* Bouton d'une formule (Agape / Essentiel) : ajoute directement la formule, puis affiche sa quantité. */
+  function formuleCtrlHTML(p, val) {
+    const key = lineKey(p.id, { [p.priceGroup]: val }), l = findLine(key);
+    if (l) return stepperHTML(key, l.qty, false, '');
+    return `<button type="button" class="add-btn" data-action="formule-add" data-id="${p.id}" data-val="${esc(val)}" data-fid="add-${hid(key)}">${ICON.plus}Ajouter à ma demande</button>`;
+  }
+  const ctrlHTML = (p, c) => c.dataset.formule ? formuleCtrlHTML(p, c.dataset.formule) : controlHTML(p);
   function controlHTML(p) {
     if (p.options && p.options.length) return `<button type="button" class="add-btn" data-action="open-product" data-id="${p.id}" data-fid="add-${p.id}">${ICON.plus}Ajouter à ma demande</button>`;
     const key = lineKey(p.id, {}), l = findLine(key);
@@ -148,7 +155,11 @@
   function refreshProduct(id) {
     const p = byId.get(id); if (!p) return;
     const q = qtyOf(id);
-    $$(`[data-ctrl="${id}"]`).forEach(c => { c.innerHTML = controlHTML(p); });
+    $$(`[data-ctrl="${id}"]`).forEach(c => {
+      c.innerHTML = ctrlHTML(p, c);
+      const f = c.closest('.formule');
+      if (f) f.classList.toggle('is-selected', !!findLine(lineKey(p.id, { [p.priceGroup]: c.dataset.formule })));
+    });
     $$(`.card[data-id="${id}"] .in-cart`).forEach(b => { b.hidden = !q; b.textContent = q + ' dans ma demande'; });
     $$(`.row[data-id="${id}"] .in-cart-inline`).forEach(b => { b.hidden = !q || !(p.options && p.options.length); b.textContent = q + ' dans ma demande'; });
   }
@@ -238,7 +249,7 @@
         ${p.sub ? `<p class="pd-sub">${esc(p.sub)}</p>` : ''}
         <div class="pd-price">${priceHtml}</div>
         ${(tagsHtml || leadHtml) ? `<div class="pd-meta">${tagsHtml}${leadHtml}</div>` : ''}
-        ${p.items.length ? `<div class="pd-list"><h4>${listTitle}</h4><ul>${p.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>` : ''}
+        ${p.items.length ? `<div class="pd-list"><h4>${listTitle}</h4><ul>${p.items.map((i, n) => `<li>${esc(i)}${(p.plus || []).includes(n) && p.plusFor ? ` <small class="only">(${esc(p.plusFor)} uniquement)</small>` : ''}</li>`).join('')}</ul></div>` : ''}
         ${p.note ? `<p class="pd-note">${esc(p.note)}</p>` : ''}
         ${(p.details || []).map(d => `<details class="pd-details"><summary>${esc(d.title)}</summary><ul>${d.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></details>`).join('')}
         ${(p.options || []).map(o => `
@@ -649,6 +660,12 @@
     switch (a) {
       case 'open-product': openProduct(t.dataset.id); break;
       case 'quick-add': addLine(t.dataset.id, {}, qMin(byId.get(t.dataset.id))); break;
+      case 'formule-add': {
+        const p = byId.get(t.dataset.id);
+        if (p.options.some(o => o.required && o.key !== p.priceGroup)) openProduct(p.id);
+        else addLine(p.id, { [p.priceGroup]: t.dataset.val }, qMin(p));
+        break;
+      }
       case 'add': { const p = byId.get(t.dataset.id); if (p && p.options.length) openProduct(p.id); else addLine(t.dataset.id, {}, qMin(p)); break; }
       case 'inc': case 'line-inc': setQty(key, findLine(key).qty + 1); break;
       case 'dec': case 'line-dec': setQty(key, findLine(key).qty - 1); break;
@@ -707,7 +724,7 @@
 
   /* ---------- Démarrage ---------- */
   $$('.group[data-mois]').forEach(g => { g.hidden = !monthOk(g.dataset.mois); });
-  $$('[data-ctrl]').forEach(c => { const p = byId.get(c.dataset.ctrl); if (p) c.innerHTML = controlHTML(p); });
+  $$('[data-ctrl]').forEach(c => { const p = byId.get(c.dataset.ctrl); if (p) c.innerHTML = ctrlHTML(p, c); });
   C.products.forEach(p => { if (qtyOf(p.id)) refreshProduct(p.id); });
   changed([]);
   if (droppedMenus) toast('Certains menus de votre sélection ne sont plus proposés : ils ont été retirés.');

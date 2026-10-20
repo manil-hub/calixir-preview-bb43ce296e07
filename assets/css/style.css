@@ -551,3 +551,39 @@ dialog:not([open]) { display: none; }
 .buffet-note { margin: 28px 0 0; padding: 20px 24px; border-radius: var(--radius); background: var(--blush); border-left: 4px solid var(--copper); font-size: 1rem; }
 .buffet-note p { margin: 0; }
 .buffet-note a { font-weight: 600; text-underline-offset: 3px; }
+
+/* ----- Menus du mois : deux formules côte à côte (Agape = menu complet, Essentiel = sans le « en plus ») ----- */
+.menus { display: grid; gap: 22px; }
+.menu { padding: 22px 22px 24px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); scroll-margin-top: calc(var(--header-h) + 70px); }
+.menu-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 16px; }
+.menu-name { font-size: clamp(1.15rem, 2.6vw, 1.4rem); font-weight: 600; line-height: 1.25; }
+.menu-name button { all: unset; cursor: pointer; }
+.menu-name button:hover { color: var(--copper-ink); }
+.menu-name button:focus-visible { outline: 2px solid var(--copper-ink); outline-offset: 3px; border-radius: 4px; }
+.menu-head .meta { margin-left: auto; }
+.formules { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@media (min-width: 760px) { .formules { grid-template-columns: 1.1fr 1fr; gap: 18px; } }
+.formule { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px 20px; border: 1px solid var(--line); border-radius: 14px; background: #fff; transition: box-shadow .15s; }
+.formule-full { background: var(--blush); border: 1.5px solid var(--copper); }
+.formule.is-selected { box-shadow: 0 0 0 2px var(--ink); }
+.formule-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.formule-name { font-size: 1.4rem; font-weight: 700; letter-spacing: .01em; line-height: 1.2; color: var(--ink); }
+.formule-full .formule-name { color: var(--copper-ink); }
+.formule-count { margin: 0; font-size: .84rem; font-weight: 500; color: var(--muted); }
+.plats { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.plats li { position: relative; padding-left: 16px; font-size: .93rem; line-height: 1.4; color: #3f3d3b; }
+.plats li::before { content: ''; position: absolute; left: 0; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--copper); }
+.plats li.is-plus { font-weight: 600; color: var(--ink); }
+.plus-badge { display: inline-block; margin-right: 8px; padding: 1px 9px; border-radius: 999px; background: var(--copper); color: var(--on-copper); font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; line-height: 1.5; vertical-align: 1px; }
+.plats li.is-off, .plats li.is-off .off-badge { color: #6f6a66; }
+.plats li.is-off .plat-txt { text-decoration: line-through; text-decoration-color: #aaa098; }
+.plats li.is-off::before { background: #cfc6bf; }
+.off-badge { margin-left: 8px; font-size: .72rem; font-weight: 600; white-space: nowrap; }
+.formule-verre { display: flex; align-items: center; gap: 8px; margin: 0; padding-top: 12px; border-top: 1px dashed #d9c9bd; font-size: .9rem; font-weight: 600; color: var(--copper-ink); }
+.formule-verre svg { flex: none; width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.formule-verre.is-off { color: #6f6a66; font-weight: 500; }
+.formule-foot { margin-top: auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; }
+.formule-foot .price b { font-size: 1.55rem; }
+.formule-foot .ctrl { flex: 1 1 190px; max-width: 260px; }
+@media (max-width: 559px) { .menu { padding: 16px 14px 18px; } .formule { padding: 16px 16px 18px; } .formule-foot .ctrl { max-width: none; } }
+.pd-list .only { color: var(--copper-ink); font-weight: 600; }
