@@ -520,3 +520,34 @@ dialog:not([open]) { display: none; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ===== Retours Calixir (octobre 2026) : bandeau d'infos, encadrés, pictogrammes, mois, galerie ===== */
+.infobar { background: var(--blush); border-bottom: 1px solid var(--line); font-size: .84rem; }
+.infobar-inner { display: flex; flex-wrap: wrap; gap: 2px 28px; padding: 10px 0; color: #4d4b49; }
+.infobar strong { color: var(--ink); font-weight: 600; margin-right: 4px; }
+
+.callout { display: flex; gap: 16px; align-items: center; margin: 32px 0 0; padding: 22px 26px; border-radius: var(--radius); background: #FBF0DC; border: 2px solid #E3B766; color: #5c3906; }
+.callout svg { flex: none; width: 38px; height: 38px; fill: none; stroke: #8a5a10; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.callout p { margin: 0; font-size: clamp(1.05rem, 2.6vw, 1.35rem); font-weight: 600; line-height: 1.4; }
+
+.group-month .group-head { margin-bottom: 26px; padding-bottom: 14px; border-bottom: 2px solid var(--copper); }
+.group-month .group-head h2 { font-size: clamp(2.1rem, 6vw, 3.6rem); font-weight: 300; letter-spacing: -.01em; line-height: 1.05; }
+.group-month[hidden] { display: none; }
+.group-month { padding-top: 56px; }
+
+.picto { display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px 3px 6px; border-radius: 999px; background: #fff; border: 1px solid var(--line); font-size: .74rem; font-weight: 600; color: #5a3a22; line-height: 1.2; }
+.picto img { height: 28px; width: auto; max-width: 46px; object-fit: contain; flex: none; }
+
+.card-items { margin: 4px 0 0; }
+.card-items li { position: relative; padding-left: 14px; margin-bottom: 4px; font-size: .82rem; color: #55524f; line-height: 1.4; }
+.card-items li::before { content: ''; position: absolute; left: 0; top: .58em; width: 5px; height: 5px; border-radius: 50%; background: var(--copper); }
+.card-media.contain, .card-media.contain img { background: #fff; }
+.card-media.contain img { object-fit: contain; }
+
+.gallery { display: grid; gap: 12px; margin: 28px 0 0; grid-template-columns: repeat(2, 1fr); }
+.gallery img { width: 100%; height: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: var(--radius); box-shadow: var(--shadow); }
+.gallery-2 img { aspect-ratio: 4 / 3; }
+@media (min-width: 760px) { .gallery-7, .gallery-6 { grid-template-columns: repeat(4, 1fr); } .gallery-3 { grid-template-columns: repeat(3, 1fr); } .gallery-5 { grid-template-columns: repeat(3, 1fr); } }
+.buffet-note { margin: 28px 0 0; padding: 20px 24px; border-radius: var(--radius); background: var(--blush); border-left: 4px solid var(--copper); font-size: 1rem; }
+.buffet-note p { margin: 0; }
+.buffet-note a { font-weight: 600; text-underline-offset: 3px; }

@@ -18,6 +18,7 @@
   const fmt = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const eur = n => fmt.format(n).replace(/[  ]/g, ' ') + ' €';
   const eurTxt = n => eur(n).replace(/ /g, ' ');
+  const eurShort = n => (Number.isInteger(n) ? String(n) + ' €' : eur(n));
   const hid = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return 'k' + (h >>> 0).toString(36); };
   const delayLabel = d => String(d).replace(/(\d+)\s*h/i, '$1 h');
 
@@ -29,6 +30,31 @@
   };
 
   const byId = new Map(C.products.map(p => [p.id, p]));
+  const qMin = p => p.qmin || 1;
+
+  /* Menus du mois : seuls le mois en cours et le suivant sont proposés (?tous-les-mois pour tout voir). */
+  const SHOW_ALL_MONTHS = /[?&]tous-les-mois/.test(location.search);
+  const ym = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  const curMonth = () => ym(new Date());
+  const nextMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + 1); return ym(d); };
+  const monthOk = m => SHOW_ALL_MONTHS || m === curMonth() || m === nextMonth();
+  const isAvailable = p => !p.months.length || p.months.some(monthOk);
+  const MONTHS_FR = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+  const deMonth = m => { const n = monthName(m); return (/^[aeiouéèêh]/i.test(n) ? 'd’' : 'de ') + n; };
+  const monthName = m => { const [y, mo] = m.split('-').map(Number); return MONTHS_FR[mo - 1] + ' ' + y; };
+
+  /* Jours fériés français (fixes + Pâques) : minimum de commande majoré comme le week-end. */
+  const frHolidays = year => {
+    const a = year % 19, b = Math.floor(year / 100), c = year % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+    const easter = new Date(year, month - 1, day);
+    const plus = n => { const x = new Date(easter); x.setDate(x.getDate() + n); return x; };
+    const set = new Set([[0, 1], [4, 1], [4, 8], [6, 14], [7, 15], [10, 1], [10, 11], [11, 25]].map(([mo, da]) => ym(new Date(year, mo, da)) + '-' + String(da).padStart(2, '0')));
+    [plus(1), plus(39), plus(50)].forEach(x => set.add(ym(x) + '-' + String(x.getDate()).padStart(2, '0')));
+    return set;
+  };
   const catName = new Map(C.categories.map(c => [c.slug, c.name]));
 
   /* ---------- Stockage (tolérant : navigation privée, file://, etc.) ---------- */
@@ -38,6 +64,8 @@
   };
   const saved = store.read();
   let cart = Array.isArray(saved.cart) ? saved.cart.filter(l => l && byId.has(l.id) && l.qty > 0 && l.opts && typeof l.opts === 'object') : [];
+  const droppedMenus = cart.filter(l => !isAvailable(byId.get(l.id))).length;
+  cart = cart.filter(l => isAvailable(byId.get(l.id)));
   let form = saved.form && typeof saved.form === 'object' ? saved.form : {};
   const persist = () => store.write({ cart, form });
 
@@ -126,7 +154,7 @@
   }
   function refreshCategoryDots() {
     const counts = {};
-    cart.forEach(l => { const c = byId.get(l.id).cat; counts[c] = (counts[c] || 0) + 1; });
+    cart.forEach(l => byId.get(l.id).cats.forEach(c => { counts[c] = (counts[c] || 0) + 1; }));
     $$('[data-cat-link]').forEach(a => {
       const d = $('.dot', a); if (!d) return;
       const n = counts[a.dataset.catLink] || 0;
@@ -145,11 +173,11 @@
     const fid = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fid : null;
     (ids || []).forEach(refreshProduct);
     const t = totals();
-    $('#headerCount').hidden = t.count === 0; $('#headerCount').textContent = t.count;
+    $('#headerCount').hidden = t.lines === 0; $('#headerCount').textContent = t.lines;
     const bar = $('#cartBar'), quoteOpen = $('#quoteDialog').open;
-    bar.hidden = t.count === 0 || quoteOpen;
+    bar.hidden = t.lines === 0 || quoteOpen;
     document.body.classList.toggle('has-bar', !bar.hidden);
-    $('#barCount').textContent = t.count + (t.count > 1 ? ' produits' : ' produit');
+    $('#barCount').textContent = t.lines + (t.lines > 1 ? ' produits' : ' produit');
     $('#barTotal').textContent = totalLabel(t);
     refreshCategoryDots();
     if (quoteOpen && step === 1) renderStep1();
@@ -174,12 +202,19 @@
 
   /* ---------- Fiche produit ---------- */
   let sheet = null; // { id, qty, opts }
-  const tagText = t => C.tags[t] || '';
+  const tagText = t => (C.tags[t] && C.tags[t].text) || '';
+  const tagLabel = t => (C.tags[t] && C.tags[t].label) || (t.charAt(0).toUpperCase() + t.slice(1));
+  const tagPill = t => {
+    const ti = C.tags[t];
+    return ti && ti.icon
+      ? `<span class="picto" title="${esc(ti.label)}"><img src="${ROOT}assets/img/picto/${esc(ti.icon)}" alt="" height="28"><span>${esc(ti.label)}</span></span>`
+      : `<span class="tag">${esc(tagLabel(t))}</span>`;
+  };
 
   function infoRows(p) {
     const rows = [];
     rows.push(['Commande', p.delay ? (tagText(p.delay) || `À commander ${delayLabel(p.delay)} à l’avance (jour ouvré).`) : 'Commande passée avant 12h00 : livraison possible le lendemain.']);
-    p.tags.forEach(t => { const x = tagText(t); if (x) rows.push([t.charAt(0).toUpperCase() + t.slice(1), x]); });
+    p.tags.forEach(t => { const x = tagText(t); if (x) rows.push([tagLabel(t), x]); });
     if (p.food) rows.push(['Conservation', 'À consommer froid, sauf indication contraire. Conserver entre 0 et 4 °C et consommer dans les 6 heures suivant la livraison.']);
     rows.push(['Livraison', 'Livré sans service, à l’adresse de votre choix. Frais de livraison précisés dans votre devis.']);
     if (p.food) rows.push(['Allergies', 'Indiquez vos allergies et régimes dans votre demande : Calixir vous répondra dans le devis.']);
@@ -187,11 +222,14 @@
   }
   function openProduct(id) {
     const p = byId.get(id); if (!p) return;
-    sheet = { id, qty: 1, opts: {} };
-    const tagsHtml = p.tags.map(t => `<span class="tag">${esc(t.charAt(0).toUpperCase() + t.slice(1))}</span>`).join('');
+    sheet = { id, qty: qMin(p), opts: {} };
+    const tagsHtml = p.tags.map(tagPill).join('');
     const leadHtml = p.delay ? `<span class="lead72">${ICON.clock}Commande ${delayLabel(p.delay)} avant</span>` : '';
     const min = minPrice(p);
-    const priceHtml = min == null ? '<b>Sur devis</b>' : `<b>${eur(min)}</b><span>HT${(p.from || p.priceGroup) ? ' · à partir de' : ''}${p.unit ? ' · par ' + esc(p.unit) : ''}</span>`;
+    const minTxt = qMin(p) > 1 ? (p.unit === 'personne' ? ` · à partir de ${qMin(p)} personnes` : ` · minimum ${qMin(p)} par variété`) : '';
+    const priceHtml = min == null
+      ? `<b>Sur devis</b><span>${minTxt.replace(/^ · /, '')}</span>`
+      : `<b>${eur(min)}</b><span>HT${(p.from || p.priceGroup) ? ' · à partir de' : ''}${p.unit ? ' · par ' + esc(p.unit) : ''}${minTxt}</span>`;
     const listTitle = /^(plateau|menu|pause-box|lunchbox)/.test(p.id) ? 'Comprend' : 'Composition';
     $('#pdBody').innerHTML = `
       ${p.img ? `<div class="pd-media"><img src="${IMG + esc(p.img)}" alt=""></div>` : '<div style="height:20px"></div>'}
@@ -286,12 +324,38 @@
 
   /* Avertissements doux, tirés des conditions de vente (jamais bloquants). */
   const isWeekend = ymdStr => { if (!ymdStr) return false; const d = parseYmd(ymdStr).getDay(); return d === 0 || d === 6; };
+  const isOffDay = ymdStr => !!ymdStr && (isWeekend(ymdStr) || frHolidays(Number(ymdStr.slice(0, 4))).has(ymdStr));
   function minOrderNotice() {
     const t = totals();
-    if (!cart.length || t.unpriced || !cfg.minTtcWeek) return '';
-    const wk = isWeekend(form.date) ? cfg.minTtcWeekend : cfg.minTtcWeek;
+    if (!cart.length || t.unpriced || !cfg.minHtWeek) return '';
+    const wk = isOffDay(form.date) ? cfg.minHtWeekend : cfg.minHtWeek;
     if (t.total * 1.10 >= wk) return '';
-    return `Minimum de commande : ${wk} € TTC hors frais de livraison${isWeekend(form.date) ? ' le week-end' : ' en semaine'} (${cfg.minTtcWeekend} € TTC les week-ends et jours fériés). Votre sélection semble inférieure : ajoutez des produits ou envoyez-la tout de même, Calixir vous confirmera.`;
+    return `Minimum de commande : ${eurShort(cfg.minHtWeek)} HT hors transport en semaine, ${eurShort(cfg.minHtWeekend)} HT les week-ends et jours fériés. Votre sélection est inférieure : ajoutez des produits ou envoyez-la tout de même, Calixir vous confirmera.`;
+  }
+  function qtyNotices() {
+    const groups = new Map(), out = [];
+    cart.forEach(l => {
+      const p = byId.get(l.id);
+      if (qMin(p) <= 1) return;
+      const label = p.minPar ? (l.opts[p.minPar] || '') : '';
+      const key = p.id + '|' + label;
+      const g = groups.get(key) || { p, label, qty: 0 };
+      g.qty += l.qty; groups.set(key, g);
+    });
+    groups.forEach(g => {
+      const mn = qMin(g.p);
+      if (g.qty >= mn) return;
+      out.push(g.p.unit === 'personne'
+        ? `${g.p.name} : à partir de ${mn} personnes (vous en avez indiqué ${g.qty}).`
+        : `${g.p.name}${g.label ? ' · ' + g.label : ''} : minimum de ${mn} par variété et par commande (${g.qty} sélectionné${g.qty > 1 ? 's' : ''}).`);
+    });
+    return out;
+  }
+  function monthMismatch(ymdStr) {
+    if (!ymdStr) return [];
+    const dm = ymdStr.slice(0, 7), out = [];
+    cart.forEach(l => { const p = byId.get(l.id); if (p.months.length && !p.months.includes(dm)) { const t = `${p.name} (menu ${p.months.map(deMonth).join(' / ')})`; if (!out.includes(t)) out.push(t); } });
+    return out;
   }
   function varietyNotice() {
     const menus = new Set(cart.filter(l => byId.get(l.id).cat === 'plateaux-repas').map(l => l.id));
@@ -307,7 +371,7 @@
       el.innerHTML = `<div class="empty"><h3>Votre demande est vide</h3><p>Ajoutez des plateaux, coffrets ou boissons depuis la carte pour préparer votre devis. Aucun paiement n’est demandé.</p><button type="button" class="btn btn-primary" data-action="close-dialog">Parcourir la carte</button></div>`;
       return;
     }
-    const notices = [minOrderNotice(), varietyNotice()].filter(Boolean);
+    const notices = [minOrderNotice(), varietyNotice(), ...qtyNotices()].filter(Boolean);
     el.innerHTML = `
       <h3 class="step-title">Votre sélection</h3>
       <ul class="lines">${cart.map(l => {
@@ -322,14 +386,14 @@
       }).join('')}</ul>
       <div class="total-box">
         <div class="total-row"><span>Estimation ${t.hasFrom || t.unpriced ? '(prix de départ)' : ''}</span><b>${totalLabel(t)}</b></div>
-        <p>Estimation indicative hors frais de livraison et TVA. Calixir vous envoie un devis définitif, avec les frais de livraison selon votre adresse.</p>
+        <p>Estimation indicative hors transport${cfg.transportFrom ? ' (à partir de ' + eur(cfg.transportFrom) + ' HT, selon votre adresse)' : ''} et hors TVA. Calixir vous envoie un devis définitif.</p>
       </div>
       ${notices.map(n => `<p class="notice">${esc(n)}</p>`).join('')}
       <button type="button" class="btn btn-ghost add-more" data-action="close-dialog">+ Ajouter d’autres produits</button>`;
   }
   function renderSelSummary() {
     const t = totals();
-    const html = `<details class="sel-summary"><summary><span>Ma sélection · ${t.count} produit${t.count > 1 ? 's' : ''}</span><span>${esc(totalLabel(t))}</span></summary><ul>${cart.map(l => {
+    const html = `<details class="sel-summary"><summary><span>Ma sélection · ${t.lines} produit${t.lines > 1 ? 's' : ''}</span><span>${esc(totalLabel(t))}</span></summary><ul>${cart.map(l => {
       const p = byId.get(l.id), o = describeOpts(p, l.opts);
       return `<li><span>${l.qty} × ${esc(p.name)}${o.length ? `<span class="opts">${o.map(esc).join(' · ')}</span>` : ''}</span><span>${unitPrice(l) == null ? '—' : eur(unitPrice(l) * l.qty)}</span></li>`;
     }).join('')}</ul></details>`;
@@ -353,7 +417,8 @@
   function bindFormValues() {
     $$('#qStep2 [name], #qStep3 [name]').forEach(el => {
       const v = form[el.name];
-      if (el.type === 'checkbox' && el.name === 'diet') el.checked = Array.isArray(v) && v.includes(el.value);
+      if (el.type === 'radio') el.checked = v === el.value;
+      else if (el.type === 'checkbox' && el.name === 'diet') el.checked = Array.isArray(v) && v.includes(el.value);
       else if (el.type === 'checkbox') el.checked = el.name === 'consent' ? false : !!v;
       else el.value = v == null ? '' : v;
     });
@@ -362,7 +427,8 @@
     $$('.form .error').forEach(e => e.remove());
   }
   function readField(el) {
-    if (el.name === 'diet') form.diet = $$('#qStep2 input[name="diet"]:checked').map(i => i.value);
+    if (el.type === 'radio') { if (el.checked) form[el.name] = el.value; }
+    else if (el.name === 'diet') form.diet = $$('#qStep2 input[name="diet"]:checked').map(i => i.value);
     else if (el.type === 'checkbox') { if (el.name !== 'consent') form[el.name] = el.checked; }
     else if (el.name !== 'website') form[el.name] = el.value;
     persist();
@@ -386,7 +452,9 @@
         const monday = new Date(today); monday.setDate(monday.getDate() + (dow === 6 ? 2 : 1));
         if (d <= monday) msgs.push('Les commandes ne sont pas prises le week-end pour une livraison du même week-end ou du lundi suivant. Appelez-nous au ' + cfg.phone + '.');
       }
-      if (isWeekend(v) && cfg.minTtcWeekend) msgs.push(`Livraison un week-end : minimum de commande de ${cfg.minTtcWeekend} € TTC hors frais de livraison.`);
+      if (isOffDay(v) && cfg.minHtWeekend) msgs.push(`Livraison un week-end ou un jour férié : minimum de commande de ${eurShort(cfg.minHtWeekend)} HT hors transport.`);
+      const mism = monthMismatch(v);
+      if (mism.length) msgs.push(`Menus proposés à une autre date : ${mism.join(' ; ')}.`);
     }
     hint.hidden = !msgs.length; hint.className = 'hint' + (msgs.length ? ' warn' : ''); hint.textContent = msgs.join(' ');
   }
@@ -400,7 +468,7 @@
     const wrap = el.closest('.field'); if (!wrap) return;
     wrap.classList.add('has-error');
     let p = wrap.querySelector('.error');
-    if (!p) { p = document.createElement('p'); p.className = 'error'; p.id = 'err-' + (el.id || el.name); el.insertAdjacentElement('afterend', p); }
+    if (!p) { p = document.createElement('p'); p.className = 'error'; p.id = 'err-' + (el.id || el.name); if (el.type === 'radio') wrap.appendChild(p); else el.insertAdjacentElement('afterend', p); }
     p.textContent = msg; el.setAttribute('aria-invalid', 'true'); el.setAttribute('aria-describedby', p.id);
   }
   function clearError(el) {
@@ -414,7 +482,8 @@
       clearError(el);
       let msg = '';
       const v = el.validity;
-      if (el.type === 'checkbox') { if (!el.checked) msg = 'Merci de cocher cette case pour continuer.'; }
+      if (el.type === 'radio') { if (!$$(`input[name="${el.name}"]`).some(x => x.checked)) msg = 'Choisissez le matin ou l’après-midi.'; }
+      else if (el.type === 'checkbox') { if (!el.checked) msg = 'Merci de cocher cette case pour continuer.'; }
       else if (v.valueMissing) msg = 'Ce champ est obligatoire.';
       else if (v.typeMismatch && el.type === 'email') msg = 'Adresse e-mail invalide.';
       else if (v.patternMismatch && el.name === 'zip') msg = 'Code postal à 5 chiffres.';
@@ -424,8 +493,6 @@
       if (!msg && el.name === 'phone' && el.value.replace(/\D/g, '').length < 8) msg = 'Numéro de téléphone invalide.';
       if (msg) { fieldError(el, msg); if (!first) first = el; }
     });
-    const to = $('#f-timeTo');
-    if (sel === '#qStep2' && to.value && $('#f-timeFrom').value && to.value <= $('#f-timeFrom').value) { clearError(to); fieldError(to, 'Doit être après l’heure de livraison souhaitée.'); if (!first) first = to; }
     if (first) first.focus();
     return !first;
   }
@@ -434,7 +501,7 @@
   const longDate = s => parseYmd(s).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const newRef = () => { const d = new Date(); const r = Math.random().toString(36).slice(2, 6).toUpperCase(); return 'DV-' + String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + r; };
   const addressText = () => [form.address, [form.zip, form.city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  const timeText = () => (form.timeFrom || '') + (form.timeTo ? ' (au plus tard ' + form.timeTo + ')' : '');
+  const timeText = () => (form.slot || '') + (form.timeFrom ? ' · vers ' + form.timeFrom : '');
 
   function buildRecap() {
     const t = totals();
@@ -453,7 +520,7 @@
     if (form.billDiff && form.billing) out.push('Facturation : ' + form.billing.replace(/\s*\n\s*/g, ', '));
     out.push('', 'LIVRAISON');
     out.push('Date : ' + (form.date ? longDate(form.date) : ''));
-    out.push('Heure souhaitée : ' + timeText());
+    out.push('Livraison : ' + timeText());
     out.push('Nombre de personnes : ' + (form.guests || ''));
     out.push('Adresse : ' + addressText());
     if (form.access) out.push('Accès : ' + form.access.replace(/\s*\n\s*/g, ' / '));
@@ -500,7 +567,7 @@
   /* Étape 4 : récapitulatif complet avant envoi */
   function renderStep4() {
     const r = buildRecap(), t = r.estimate;
-    const notices = [minOrderNotice(), varietyNotice()].filter(Boolean);
+    const notices = [minOrderNotice(), varietyNotice(), ...qtyNotices(), ...(monthMismatch(form.date).length ? ['Menus proposés à une autre date : ' + monthMismatch(form.date).join(' ; ') + '.'] : [])].filter(Boolean);
     const blk = (title, stepNo, inner) => `<section class="review-block"><div class="review-head"><h4>${title}</h4><button type="button" class="link-btn" data-action="goto-step" data-step="${stepNo}">Modifier</button></div>${inner}</section>`;
     const dl = rows => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
     $('#qStep4').innerHTML = `
@@ -508,9 +575,9 @@
       <p class="review-intro">Relisez les informations ci-dessous avant l’envoi. Vous pouvez tout modifier.</p>
       ${blk('Produits sélectionnés', 1, `<ul class="review-lines">${r.lines.map(l => `<li><span>${l.qty} × ${esc(l.name)}${l.options.length ? `<span class="opts">${l.options.map(esc).join(' · ')}</span>` : ''}</span><span class="amt">${l.total == null ? 'sur devis' : eur(l.total)}</span></li>`).join('')}</ul>
         <div class="total-row" style="margin-top:12px"><span>Estimation HT${t.hasFrom || t.unpriced ? ' (prix de départ)' : ''}</span><b>${esc(totalLabel(t).replace(' HT', ''))}</b></div>
-        <p class="line-unit" style="margin:6px 0 0">Hors frais de livraison et TVA. Le devis définitif vous est envoyé par Calixir.</p>`)}
+        <p class="line-unit" style="margin:6px 0 0">Hors transport et TVA. Le devis définitif vous est envoyé par Calixir.</p>`)}
       ${blk('Livraison', 2, dl([
-        ['Date', form.date ? longDate(form.date) : ''], ['Heure souhaitée', timeText()], ['Personnes', form.guests],
+        ['Date', form.date ? longDate(form.date) : ''], ['Livraison', timeText()], ['Personnes', form.guests],
         ['Adresse', addressText()], form.access && ['Accès', form.access], form.diet && form.diet.length && ['Régimes', form.diet.join(', ')], form.notes && ['Commentaires', form.notes]]))}
       ${blk('Coordonnées', 3, dl([
         ['Société', form.company], ['Contact', r.who], ['E-mail', form.email], ['Téléphone', form.phone],
@@ -559,7 +626,7 @@
       _subject: `Demande de devis ${form.ref} · ${form.company || r.who} · livraison du ${form.date ? parseYmd(form.date).toLocaleDateString('fr-FR') : ''}`,
       reference: form.ref, type: 'demande de devis (non commande)',
       email: form.email, name: r.who, company: form.company || '', phone: form.phone, po: form.po || '',
-      delivery: { date: form.date, time: form.timeFrom, latest: form.timeTo || '', guests: form.guests, address: form.address, zip: form.zip, city: form.city, access: form.access || '' },
+      delivery: { date: form.date, slot: form.slot || '', time: form.timeFrom || '', guests: form.guests, address: form.address, zip: form.zip, city: form.city, access: form.access || '' },
       diet: form.diet || [], comments: form.notes || '', billing: form.billDiff ? form.billing : '',
       lines: r.lines, estimate: r.estimate, message: r.text
     };
@@ -581,8 +648,8 @@
     const a = t.dataset.action, key = t.dataset.key;
     switch (a) {
       case 'open-product': openProduct(t.dataset.id); break;
-      case 'quick-add': addLine(t.dataset.id, {}, 1); break;
-      case 'add': { const p = byId.get(t.dataset.id); if (p && p.options.length) openProduct(p.id); else addLine(t.dataset.id, {}, 1); break; }
+      case 'quick-add': addLine(t.dataset.id, {}, qMin(byId.get(t.dataset.id))); break;
+      case 'add': { const p = byId.get(t.dataset.id); if (p && p.options.length) openProduct(p.id); else addLine(t.dataset.id, {}, qMin(p)); break; }
       case 'inc': case 'line-inc': setQty(key, findLine(key).qty + 1); break;
       case 'dec': case 'line-dec': setQty(key, findLine(key).qty - 1); break;
       case 'line-remove': setQty(key, 0); break;
@@ -639,8 +706,10 @@
   }
 
   /* ---------- Démarrage ---------- */
+  $$('.group[data-mois]').forEach(g => { g.hidden = !monthOk(g.dataset.mois); });
   $$('[data-ctrl]').forEach(c => { const p = byId.get(c.dataset.ctrl); if (p) c.innerHTML = controlHTML(p); });
   C.products.forEach(p => { if (qtyOf(p.id)) refreshProduct(p.id); });
   changed([]);
+  if (droppedMenus) toast('Certains menus de votre sélection ne sont plus proposés : ils ont été retirés.');
   if (/^#p-/.test(location.hash)) { const el = document.getElementById(location.hash.slice(1)); if (el) setTimeout(() => el.scrollIntoView({ block: 'center' }), 50); }
 })();
